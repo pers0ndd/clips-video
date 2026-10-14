@@ -9,17 +9,20 @@ import urllib.request
 GQL_HASH = "36b89d2507fce29e5ca551df756d27c1cfe079e2609642b4390aa4c35796eb11"
 GQL_CLIENT_ID = "kimne78kx3ncx6brgo4mv6wki5h1ko"
 
-# Область камеры в кадре 1920x1080: x, y, ширина, высота
-FACECAMS = {
-    "dangerlyoha": (26, 450, 516, 282),
-    "morphe_ya": (2, 449, 483, 327),
-    "kopsteep": (26, 392, 522, 293),
+# Настройки стримеров (координаты в кадре 1920x1080):
+#   face   = (x, y, ширина, высота): где находится камера
+#   game_x = левый край куска игры для нижней части (правее камеры).
+#            Больше число: кусок сдвигается вправо.
+STREAMERS = {
+    "dangerlyoha": {"face": (26, 450, 516, 282), "game_x": 556},
+    "morphe_ya": {"face": (2, 449, 483, 327), "game_x": 492},
+    "kopsteep": {"face": (26, 392, 522, 293), "game_x": 556},
 }
 
 OUT_W, OUT_H = 1080, 1920
-FACE_H = 720      # высота блока с камерой сверху
-GAME_Y = 1000     # где начинается игра
-GAME_H = 608      # высота игры (16:9 при ширине 1080)
+FACE_H = 720                # высота камеры сверху (960 = ровно пополам)
+GAME_H = OUT_H - FACE_H     # высота игры снизу
+TEXT_Y = FACE_H             # центр блока с текстом (на стыке камеры и игры)
 FONT = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
 
 SLUG = os.environ["SLUG"].strip()
@@ -51,7 +54,13 @@ def get_download_url(slug):
         headers={"Client-Id": GQL_CLIENT_ID, "Content-Type": "application/json"},
     )
     with urllib.request.urlopen(req, timeout=30) as r:
-        clip = json.load(r)[0]["data"]["clip"]
+        resp = json.load(r)[0]
+    clip = (resp.get("data") or {}).get("clip")
+    if not clip:
+        errors = resp.get("errors")
+        if errors:
+            raise ValueError("Twitch изменил внутренний запрос, нужно обновить код: " + str(errors)[:150])
+        raise ValueError("клип с таким slug не найден, проверь slug")
     best = max(
         clip["videoQualities"],
         key=lambda q: (float(q["quality"]), q.get("frameRate") or 0),
@@ -80,39 +89,39 @@ def duration(path):
 
 
 def layout_text(text):
-    room = GAME_Y - FACE_H - 20
     for size in (64, 56, 48, 40):
         width = max(8, int(980 / (size * 0.66)))
         lines = textwrap.wrap(text, width=width)
-        lh = int(size * 1.25)
-        if len(lines) * lh <= room:
-            return size, lh, lines
+        if len(lines) <= 3:
+            return size, int(size * 1.25), lines
     width = max(8, int(980 / (40 * 0.66)))
-    return 40, 50, textwrap.wrap(text, width=width)[:5]
+    return 40, 50, textwrap.wrap(text, width=width)[:4]
 
 
 def build_video():
-    x, y, w, h = FACECAMS[STREAMER]
+    cfg = STREAMERS[STREAMER]
+    x, y, w, h = cfg["face"]
+    gx = cfg["game_x"]
+
     face_crop = (
         f"crop=iw*{w / 1920:.5f}:ih*{h / 1080:.5f}"
         f":iw*{x / 1920:.5f}:ih*{y / 1080:.5f}"
     )
+    # кусок игры нужной пропорции: на всю высоту кадра, начиная с game_x
+    game_crop = f"crop=ih*{OUT_W / GAME_H:.5f}:ih:iw*{gx / 1920:.5f}:0"
+
     parts = [
-        "[0:v]split=3[a][b][c]",
-        f"[a]scale=270:480:force_original_aspect_ratio=increase,crop=270:480,"
-        f"gblur=sigma=8,scale={OUT_W}:{OUT_H},eq=brightness=-0.1[bg]",
-        f"[b]{face_crop},scale={OUT_W}:{FACE_H}:force_original_aspect_ratio=increase,"
+        "[0:v]split=2[a][b]",
+        f"[a]{face_crop},scale={OUT_W}:{FACE_H}:force_original_aspect_ratio=increase,"
         f"crop={OUT_W}:{FACE_H}[face]",
-        f"[c]scale={OUT_W}:{GAME_H}[game]",
-        "[bg][face]overlay=0:0[t1]",
-        f"[t1][game]overlay=0:{GAME_Y}[t2]",
+        f"[b]{game_crop},scale={OUT_W}:{GAME_H}[game]",
+        "[face][game]vstack[t2]",
     ]
     last = "t2"
 
     if TEXT:
         size, lh, lines = layout_text(TEXT)
-        gap = GAME_Y - FACE_H
-        top = FACE_H + (gap - len(lines) * lh) // 2
+        top = TEXT_Y - (len(lines) * lh) // 2
         for i, line in enumerate(lines):
             name = f"line{i}.txt"
             with open(name, "w", encoding="utf-8") as f:
@@ -156,7 +165,7 @@ def send_video():
 
 
 def main():
-    if STREAMER not in FACECAMS:
+    if STREAMER not in STREAMERS:
         raise ValueError(f"для стримера {STREAMER} ещё не настроена камера")
     download(get_download_url(SLUG), "clip.mp4")
     build_video()
