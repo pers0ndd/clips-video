@@ -23,7 +23,7 @@ OUT_W, OUT_H = 1080, 1920
 FACE_H = 720                # высота камеры сверху (960 = ровно пополам)
 GAME_H = OUT_H - FACE_H     # высота игры снизу
 TEXT_Y = FACE_H             # центр блока с текстом (на стыке камеры и игры)
-FONT = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
+FONT = "font.ttf"
 
 SLUG = os.environ["SLUG"].strip()
 STREAMER = os.environ["STREAMER"].strip().lower()
