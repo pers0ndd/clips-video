@@ -1,0 +1,39 @@
+name: make-video
+
+on:
+  workflow_dispatch:
+    inputs:
+      slug:
+        description: "Slug клипа (из ссылки на клип)"
+        required: true
+      streamer:
+        description: "Ник стримера"
+        required: true
+      chat_id:
+        description: "ID вашего чата в Telegram"
+        required: true
+      text:
+        description: "Текст на видео (можно оставить пустым)"
+        required: false
+        default: ""
+
+jobs:
+  make:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install ffmpeg and fonts
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg fonts-dejavu-core
+
+      - name: Make and send video
+        env:
+          SLUG: ${{ inputs.slug }}
+          STREAMER: ${{ inputs.streamer }}
+          CHAT_ID: ${{ inputs.chat_id }}
+          TEXT: ${{ inputs.text }}
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+        run: python3 make_video.py
