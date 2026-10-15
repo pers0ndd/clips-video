@@ -16,6 +16,18 @@ on:
         description: "Текст на видео (можно оставить пустым)"
         required: false
         default: ""
+      layout:
+        description: "Раскладка: split (камера + игра) или irl (4:3)"
+        required: false
+        type: choice
+        default: split
+        options:
+          - split
+          - irl
+      profile:
+        description: "Профиль камеры (для split)"
+        required: false
+        default: default
 
 jobs:
   make:
@@ -35,5 +47,7 @@ jobs:
           STREAMER: ${{ inputs.streamer }}
           CHAT_ID: ${{ inputs.chat_id }}
           TEXT: ${{ inputs.text }}
+          LAYOUT: ${{ inputs.layout }}
+          PROFILE: ${{ inputs.profile }}
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
         run: python3 make_video.py
