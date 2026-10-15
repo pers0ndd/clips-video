@@ -12,7 +12,6 @@ GQL_CLIENT_ID = "kimne78kx3ncx6brgo4mv6wki5h1ko"
 # Настройки стримеров (координаты в кадре 1920x1080):
 #   face   = (x, y, ширина, высота): где находится камера
 #   game_x = левый край куска игры для нижней части (правее камеры).
-#            Больше число: кусок сдвигается вправо.
 STREAMERS = {
     "dangerlyoha": {"face": (26, 450, 516, 282), "game_x": 556},
     "morphe_ya": {"face": (2, 449, 483, 327), "game_x": 492},
@@ -24,10 +23,13 @@ FACE_H = 720                # высота камеры сверху (960 = ро
 GAME_H = OUT_H - FACE_H     # высота игры снизу
 TEXT_Y = FACE_H             # центр блока с текстом (на стыке камеры и игры)
 FONT = "font.ttf"
+
+# Водяной знак (режим наложения Overlay)
 WATERMARK = "watermark.png"
 WM_WIDTH = 700        # ширина знака в пикселях (всего видео 1080)
 WM_OPACITY = 0.85     # сила наложения: 0.0 - не видно, 1.0 - на полную
 WM_BOTTOM = 120       # отступ от нижнего края видео
+
 SLUG = os.environ["SLUG"].strip()
 STREAMER = os.environ["STREAMER"].strip().lower()
 CHAT_ID = os.environ["CHAT_ID"].strip()
@@ -137,7 +139,8 @@ def build_video():
             )
             last = nxt
 
-        if os.path.exists(WATERMARK):
+    use_wm = os.path.exists(WATERMARK)
+    if use_wm:
         parts += [
             f"[1:v]format=rgba,scale={WM_WIDTH}:-1[wm]",
             f"color=c=0x808080:s={OUT_W}x{OUT_H}:r=30[g]",
@@ -145,17 +148,19 @@ def build_video():
             f"[{last}][wmc]blend=all_mode=overlay:all_opacity={WM_OPACITY}:shortest=1[wmo]",
         ]
         last = "wmo"
+
     parts.append(f"[{last}]format=yuv420p[out]")
 
     dur = duration("clip.mp4")
     vb = int(min(6000, 47 * 8 * 1000 / max(dur, 1) - 160))
+
     cmd = ["ffmpeg", "-y", "-i", "clip.mp4"]
-    if os.path.exists(WATERMARK):
+    if use_wm:
         cmd += ["-loop", "1", "-framerate", "30", "-i", WATERMARK]
     cmd += [
         "-filter_complex", ";".join(parts),
-        "-t", f"{dur:.3f}",
         "-map", "[out]", "-map", "0:a?",
+        "-t", f"{dur:.3f}",
         "-c:v", "libx264", "-preset", "veryfast",
         "-b:v", f"{vb}k", "-maxrate", f"{vb}k", "-bufsize", f"{2 * vb}k",
         "-c:a", "aac", "-b:a", "128k",
