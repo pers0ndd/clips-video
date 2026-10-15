@@ -38,11 +38,12 @@ FACE_H = 720                # высота камеры сверху (960 = ро
 GAME_H = OUT_H - FACE_H     # высота игры снизу
 SPLIT_TEXT_Y = FACE_H       # центр текста (на стыке камеры и игры)
 
-# --- раскладка "irl": центр кадра 4:3 на размытом фоне ---
-IRL_H = OUT_W * 3 // 4                # высота видео 4:3 при ширине 1080 = 810
-IRL_Y = (OUT_H - IRL_H) // 2          # отступ сверху (555)
-IRL_TEXT_Y = IRL_Y // 2               # текст: по центру верхней размытой полосы
-IRL_WM_Y = IRL_Y + IRL_H + 40         # знак: сразу под видео (расстояние от верха)
+# --- раскладка "irl": само видео 4:3 (центр кадра, края обрезаются), 1440x1080 ---
+IRL_W, IRL_H = 1440, 1080
+IRL_WM_WIDTH = 330          # ширина знака в IRL (кадр шире, поэтому больше, чем WM_WIDTH)
+IRL_WM_BOTTOM = 40          # отступ знака от нижнего края
+IRL_TEXT_SIZE = 38          # размер текста в IRL (небольшой)
+IRL_TEXT_GAP = 16           # зазор между текстом и знаком
 
 # --- водяной знак (режим наложения Overlay) ---
 WATERMARK = "watermark.png"
@@ -115,29 +116,34 @@ def duration(path):
     return float(out)
 
 
-def layout_text(text):
-    for size in (64, 56, 48, 40):
-        width = max(8, int(980 / (size * 0.66)))
+def layout_text(text, sizes=(64, 56, 48, 40), max_w=980, max_lines=3):
+    for size in sizes:
+        width = max(8, int(max_w / (size * 0.66)))
         lines = textwrap.wrap(text, width=width)
-        if len(lines) <= 3:
+        if len(lines) <= max_lines:
             return size, int(size * 1.25), lines
-    width = max(8, int(980 / (40 * 0.66)))
-    return 40, 50, textwrap.wrap(text, width=width)[:4]
+    size = sizes[-1]
+    width = max(8, int(max_w / (size * 0.66)))
+    return size, int(size * 1.25), textwrap.wrap(text, width=width)[:max_lines + 1]
+
+
+def image_size(path):
+    out = subprocess.check_output([
+        "ffprobe", "-v", "error", "-select_streams", "v:0",
+        "-show_entries", "stream=width,height", "-of", "csv=p=0:s=x", path,
+    ]).decode().strip()
+    w, h = out.split("x")
+    return int(w), int(h)
 
 
 def base_chain():
-    """Возвращает (части фильтра, имя последней метки, y центра текста, y знака)."""
+    """Возвращает (части фильтра, имя последней метки, ширина и высота видео)."""
     if LAYOUT == "irl":
         parts = [
-            "[0:v]split=2[a][b]",
-            # размытый фон: центральная вертикальная полоса кадра, увеличенная и размытая
-            f"[a]crop=ih*0.5625:ih,scale=270:480,gblur=sigma=8,"
-            f"scale={OUT_W}:{OUT_H},eq=brightness=-0.1[bg]",
-            # передний план: центр кадра в пропорции 4:3 (края обрезаются)
-            f"[b]crop=ih*4/3:ih,scale={OUT_W}:{IRL_H}[fg]",
-            f"[bg][fg]overlay=0:{IRL_Y}[t2]",
+            # центр кадра в пропорции 4:3, края обрезаются
+            f"[0:v]crop=ih*4/3:ih,scale={IRL_W}:{IRL_H}[t2]",
         ]
-        return parts, "t2", IRL_TEXT_Y, str(IRL_WM_Y)
+        return parts, "t2", IRL_W, IRL_H
 
     if LAYOUT != "split":
         raise ValueError(f"неизвестная раскладка: {LAYOUT} (допустимо: split, irl)")
@@ -165,91 +171,9 @@ def base_chain():
         f"[b]{game_crop},scale={OUT_W}:{GAME_H}[game]",
         "[face][game]vstack[t2]",
     ]
-    return parts, "t2", SPLIT_TEXT_Y, f"main_h-overlay_h-{WM_BOTTOM}"
+    return parts, "t2", OUT_W, OUT_H
 
 
 def build_video():
-    parts, last, text_y, wm_y = base_chain()
-
-    if TEXT:
-        size, lh, lines = layout_text(TEXT)
-        top = text_y - (len(lines) * lh) // 2
-        for i, line in enumerate(lines):
-            name = f"line{i}.txt"
-            with open(name, "w", encoding="utf-8") as f:
-                f.write(line)
-            nxt = f"d{i}"
-            parts.append(
-                f"[{last}]drawtext=fontfile={FONT}:textfile={name}:expansion=none:"
-                f"fontsize={size}:fontcolor=white:borderw=5:bordercolor=black:"
-                f"x=(w-text_w)/2:y={top + i * lh}[{nxt}]"
-            )
-            last = nxt
-
-    use_wm = os.path.exists(WATERMARK)
-    if use_wm:
-        parts += [
-            f"[1:v]format=rgba,scale={WM_WIDTH}:-1[wm]",
-            f"color=c=0x808080:s={OUT_W}x{OUT_H}:r=30[g]",
-            f"[g][wm]overlay=(main_w-overlay_w)/2:{wm_y}:format=auto[wmc]",
-            f"[{last}][wmc]blend=all_mode=overlay:all_opacity={WM_OPACITY}:shortest=1[wmo]",
-        ]
-        last = "wmo"
-
-    parts.append(f"[{last}]format=yuv420p[out]")
-
-    dur = duration("clip.mp4")
-    vb = int(min(6000, 47 * 8 * 1000 / max(dur, 1) - 160))
-
-    cmd = ["ffmpeg", "-y", "-i", "clip.mp4"]
-    if use_wm:
-        cmd += ["-loop", "1", "-framerate", "30", "-i", WATERMARK]
-    cmd += [
-        "-filter_complex", ";".join(parts),
-        "-map", "[out]", "-map", "0:a?",
-        "-t", f"{dur:.3f}",
-        "-c:v", "libx264", "-preset", "veryfast",
-        "-b:v", f"{vb}k", "-maxrate", f"{vb}k", "-bufsize", f"{2 * vb}k",
-        "-c:a", "aac", "-b:a", "128k",
-        "-r", "30", "-movflags", "+faststart",
-        "out.mp4",
-    ]
-    subprocess.run(cmd, check=True)
-
-
-def send_video():
-    cap = f"🎬 {STREAMER}" + (" · IRL" if LAYOUT == "irl" else "")
-    subprocess.run([
-        "curl", "-sS", "--fail-with-body",
-        "-F", f"chat_id={CHAT_ID}",
-        "-F", "video=@out.mp4",
-        "-F", "supports_streaming=true",
-        "-F", f"width={OUT_W}",
-        "-F", f"height={OUT_H}",
-        "-F", f"caption={cap}",
-        f"https://api.telegram.org/bot{BOT_TOKEN}/sendVideo",
-    ], check=True)
-
-
-def main():
-    download(get_download_url(SLUG), "clip.mp4")
-    build_video()
-    send_video()
-
-
-try:
-    main()
-except subprocess.CalledProcessError as e:
-    print("Ошибка программы, код:", e.returncode)
-    try:
-        tg_message("⚠️ Не получилось собрать или отправить видео (подробности в логах GitHub Actions).")
-    except Exception:
-        pass
-    sys.exit(1)
-except Exception as e:
-    print("Ошибка:", repr(e))
-    try:
-        tg_message("⚠️ Не получилось сделать видео: " + str(e)[:300])
-    except Exception:
-        pass
-    sys.exit(1)
+    parts, last, ow, oh = base_chain()
+    irl
