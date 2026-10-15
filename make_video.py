@@ -176,4 +176,119 @@ def base_chain():
 
 def build_video():
     parts, last, ow, oh = base_chain()
-    irl
+    irl = LAYOUT == "irl"
+    use_wm = os.path.exists(WATERMARK)
+
+    # --- размеры и позиция знака ---
+    wm_w = IRL_WM_WIDTH if irl else WM_WIDTH
+    if use_wm:
+        iw, ih = image_size(WATERMARK)
+        wm_h = round(wm_w * ih / iw)
+    else:
+        wm_h = 0
+    if irl:
+        wm_y = oh - IRL_WM_BOTTOM - wm_h
+        text_bottom = (wm_y - IRL_TEXT_GAP) if use_wm else (oh - 60)
+    else:
+        wm_y = oh - WM_BOTTOM - wm_h
+
+    # --- текст ---
+    if TEXT:
+        if irl:
+            size, lh, lines = layout_text(
+                TEXT, sizes=(IRL_TEXT_SIZE, IRL_TEXT_SIZE - 4, IRL_TEXT_SIZE - 8),
+                max_w=ow - 160, max_lines=2,
+            )
+            top = text_bottom - len(lines) * lh
+            border = max(3, size // 12)
+        else:
+            size, lh, lines = layout_text(TEXT)
+            top = SPLIT_TEXT_Y - (len(lines) * lh) // 2
+            border = 5
+        for i, line in enumerate(lines):
+            name = f"line{i}.txt"
+            with open(name, "w", encoding="utf-8") as f:
+                f.write(line)
+            nxt = f"d{i}"
+            parts.append(
+                f"[{last}]drawtext=fontfile={FONT}:textfile={name}:expansion=none:"
+                f"fontsize={size}:fontcolor=white:borderw={border}:bordercolor=black:"
+                f"x=(w-text_w)/2:y={top + i * lh}[{nxt}]"
+            )
+            last = nxt
+
+    # --- водяной знак (Overlay) ---
+    if use_wm:
+        parts += [
+            f"[1:v]format=rgba,scale={wm_w}:-1[wm]",
+            f"color=c=0x808080:s={ow}x{oh}:r=30[g]",
+            f"[g][wm]overlay=(main_w-overlay_w)/2:{wm_y}:format=auto[wmc]",
+            f"[{last}][wmc]blend=all_mode=overlay:all_opacity={WM_OPACITY}:shortest=1[wmo]",
+        ]
+        last = "wmo"
+
+    parts.append(f"[{last}]format=yuv420p[out]")
+
+    dur = duration("clip.mp4")
+    vb = int(min(6000, 47 * 8 * 1000 / max(dur, 1) - 160))
+
+    cmd = ["ffmpeg", "-y", "-i", "clip.mp4"]
+    if use_wm:
+        cmd += ["-loop", "1", "-framerate", "30", "-i", WATERMARK]
+    cmd += [
+        "-filter_complex", ";".join(parts),
+        "-map", "[out]", "-map", "0:a?",
+        "-t", f"{dur:.3f}",
+        "-c:v", "libx264", "-preset", "veryfast",
+        "-b:v", f"{vb}k", "-maxrate", f"{vb}k", "-bufsize", f"{2 * vb}k",
+        "-c:a", "aac", "-b:a", "128k",
+        "-r", "30", "-movflags", "+faststart",
+        "out.mp4",
+    ]
+    subprocess.run(cmd, check=True)
+    return ow, oh
+
+
+def send_video(ow, oh):
+    cap = f"🎬 {STREAMER}" + (" · IRL" if LAYOUT == "irl" else "")
+    subprocess.run([
+        "curl", "-sS", "--fail-with-body",
+        "-F", f"chat_id={CHAT_ID}",
+        "-F", "video=@out.mp4",
+        "-F", "supports_streaming=true",
+        "-F", f"width={ow}",
+        "-F", f"height={oh}",
+        "-F", f"caption={cap}",
+        f"https://api.telegram.org/bot{BOT_TOKEN}/sendVideo",
+    ], check=True)
+
+
+def main():
+    print(f"make_video.py v3 | раскладка={LAYOUT} | стример={STREAMER} | профиль={PROFILE}", flush=True)
+    print("1/4 получаю ссылку на клип", flush=True)
+    url = get_download_url(SLUG)
+    print("2/4 скачиваю клип", flush=True)
+    download(url, "clip.mp4")
+    print("3/4 собираю видео", flush=True)
+    ow, oh = build_video()
+    print(f"4/4 отправляю в Telegram ({ow}x{oh})", flush=True)
+    send_video(ow, oh)
+    print("\nГотово: Telegram принял видео", flush=True)
+
+
+try:
+    main()
+except subprocess.CalledProcessError as e:
+    print("Ошибка программы, код:", e.returncode)
+    try:
+        tg_message("⚠️ Не получилось собрать или отправить видео (подробности в логах GitHub Actions).")
+    except Exception:
+        pass
+    sys.exit(1)
+except Exception as e:
+    print("Ошибка:", repr(e))
+    try:
+        tg_message("⚠️ Не получилось сделать видео: " + str(e)[:300])
+    except Exception:
+        pass
+    sys.exit(1)
