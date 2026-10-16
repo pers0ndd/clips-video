@@ -1,3 +1,4 @@
+import glob
 import json
 import os
 import subprocess
@@ -40,9 +41,9 @@ SPLIT_TEXT_Y = FACE_H       # центр текста (на стыке каме�
 
 # --- раскладка "irl": само видео 4:3 (центр кадра, края обрезаются), 1440x1080 ---
 IRL_W, IRL_H = 1440, 1080
-IRL_WM_WIDTH = 150          # ширина знака в IRL (кадр шире, поэтому больше, чем WM_WIDTH)
+IRL_WM_WIDTH = 150          # ширина знака в IRL
 IRL_WM_BOTTOM = 40          # отступ знака от нижнего края
-IRL_TEXT_SIZE = 50          # размер текста в IRL (небольшой)
+IRL_TEXT_SIZE = 50          # размер текста в IRL
 IRL_TEXT_GAP = 16           # зазор между текстом и знаком
 
 # --- водяной знак (режим наложения Overlay) ---
@@ -50,6 +51,15 @@ WATERMARK = "watermark.png"
 WM_WIDTH = 250        # ширина знака в пикселях (всего видео 1080)
 WM_OPACITY = 0.50     # сила наложения: 0.0 - не видно, 1.0 - на полную
 WM_BOTTOM = 120       # отступ от нижнего края (только для раскладки split)
+
+# --- автоопределение камеры (раскладка "auto") ---
+# Эталоны камер лежат в корне репозитория: ref_<ник>__<профиль>.png
+# (их делает страничка-калибровка). Бот ищет эталон по всему кадру клипа:
+# камера может стоять в другом месте или быть другого размера.
+GAME_W = 972           # ширина куска игры в кадре 1920x1080 (пропорция нижней части видео)
+MIN_SCORE = 0.60       # минимальное совпадение с эталоном
+MIN_BLOCKS = 2         # сколько из 6 частей камеры должно совпасть (защита от ложных срабатываний)
+SCALES = [0.6 + 0.05 * i for i in range(21)]   # размеры камеры 60%...160% от эталона
 
 SLUG = os.environ["SLUG"].strip()
 STREAMER = os.environ["STREAMER"].strip().lower()
@@ -136,17 +146,135 @@ def image_size(path):
     return int(w), int(h)
 
 
-def base_chain():
-    """Возвращает (части фильтра, имя последней метки, ширина и высота видео)."""
+
+def grab_frames(clip, count=7):
+    """Несколько кадров клипа (серые, 1920x1080)."""
+    import numpy as np
+    dur = duration(clip)
+    frames = []
+    for i in range(count):
+        t = dur * (i + 0.5) / count
+        raw = subprocess.run(
+            ["ffmpeg", "-v", "error", "-ss", f"{t:.3f}", "-i", clip, "-frames:v", "1",
+             "-vf", "scale=1920:1080", "-f", "rawvideo", "-pix_fmt", "gray", "-"],
+            capture_output=True).stdout
+        if len(raw) == 1920 * 1080:
+            frames.append(np.frombuffer(raw, np.uint8).reshape(1080, 1920))
+    return frames
+
+
+def find_camera(frames, ref_path):
+    """Ищет эталон по всему кадру. Возвращает (совпадение, x, y, w, h, частей_совпало)."""
+    import cv2
+    ref = cv2.imread(ref_path, cv2.IMREAD_GRAYSCALE)
+    if ref is None:
+        return None
+    th, tw = ref.shape
+    half = [cv2.resize(f, (960, 540), interpolation=cv2.INTER_AREA) for f in frames]
+
+    best = (-1.0, 0, 0, 1.0)
+    for s in SCALES:
+        w, h = int(round(tw * s / 2)), int(round(th * s / 2))
+        if w < 24 or h < 16 or w >= 960 or h >= 540:
+            continue
+        t = cv2.resize(ref, (w, h), interpolation=cv2.INTER_AREA)
+        for f in half:
+            _, mx, _, loc = cv2.minMaxLoc(cv2.matchTemplate(f, t, cv2.TM_CCOEFF_NORMED))
+            if mx > best[0]:
+                best = (mx, loc[0] * 2, loc[1] * 2, s)
+    score, cx, cy, s = best
+    if score < 0:
+        return None
+
+    # уточнение в полном разрешении
+    fine = (score, cx, cy, s)
+    for ds in (-0.04, -0.02, 0.0, 0.02, 0.04):
+        s2 = s + ds
+        w, h = int(round(tw * s2)), int(round(th * s2))
+        if w >= 1920 or h >= 1080:
+            continue
+        t = cv2.resize(ref, (w, h), interpolation=cv2.INTER_AREA)
+        for f in frames:
+            x0, y0 = max(cx - 8, 0), max(cy - 8, 0)
+            roi = f[y0:min(cy + h + 8, 1080), x0:min(cx + w + 8, 1920)]
+            if roi.shape[0] < h or roi.shape[1] < w:
+                continue
+            _, mx, _, loc = cv2.minMaxLoc(cv2.matchTemplate(roi, t, cv2.TM_CCOEFF_NORMED))
+            if mx > fine[0] - 1e-9:
+                fine = (mx, x0 + loc[0], y0 + loc[1], s2)
+    score, x, y, s = fine
+    w, h = int(round(tw * s)), int(round(th * s))
+
+    # проверка по частям: камера должна совпасть хотя бы в нескольких из 6 кусков
+    t = cv2.resize(ref, (w, h), interpolation=cv2.INTER_AREA)
+    blocks = 0
+    for j in range(2):
+        for i in range(3):
+            x0, x1, y0, y1 = i * w // 3, (i + 1) * w // 3, j * h // 2, (j + 1) * h // 2
+            tb = t[y0:y1, x0:x1]
+            top = 0.0
+            for f in frames:
+                fb = f[y + y0:y + y1, x + x0:x + x1]
+                if fb.shape == tb.shape and tb.std() >= 3 and fb.std() >= 3:
+                    top = max(top, float(cv2.matchTemplate(fb, tb, cv2.TM_CCOEFF_NORMED)[0, 0]))
+            blocks += top > 0.5
+    return score, x, y, w, h, blocks
+
+
+def game_x_for(x, w):
+    if x + w / 2 < 960:
+        return int(min(x + w + 10, 1920 - GAME_W))
+    return int(max(x - 10 - GAME_W, 0))
+
+
+def detect_camera(clip, streamer):
+    """Ищет камеру стримера по эталонам. Возвращает словарь с результатом."""
+    refs = sorted(glob.glob(f"ref_{streamer}__*.png"))
+    if not refs:
+        return {"found": False, "reason": f"нет эталонов камеры для {streamer}"}
+    try:
+        import cv2  # noqa: F401
+    except Exception:
+        return {"found": False, "reason": "OpenCV не установлен"}
+    frames = grab_frames(clip)
+    if not frames:
+        return {"found": False, "reason": "не удалось прочитать кадры клипа"}
+
+    best = None
+    for ref in refs:
+        res = find_camera(frames, ref)
+        if res and (best is None or res[0] > best["score"]):
+            name = os.path.basename(ref)[len(f"ref_{streamer}__"):-4]
+            best = {"score": res[0], "x": res[1], "y": res[2], "w": res[3], "h": res[4],
+                    "blocks": res[5], "profile": name}
+    if not best:
+        return {"found": False, "reason": "не удалось прочитать эталоны"}
+    print(f"лучшее совпадение: {best}", flush=True)
+    if best["score"] < MIN_SCORE or best["blocks"] < MIN_BLOCKS:
+        return {"found": False, "reason": f"камера не найдена (совпадение {best['score']:.2f})"}
+    best["found"] = True
+    best["game_x"] = game_x_for(best["x"], best["w"])
+    return best
+
+
+def resolve_plan():
+    """Решает, какую раскладку делать. Возвращает (раскладка, камера, game_x, примечание)."""
     if LAYOUT == "irl":
-        parts = [
-            # центр кадра в пропорции 4:3, края обрезаются
-            f"[0:v]crop=ih*4/3:ih,scale={IRL_W}:{IRL_H}[t2]",
-        ]
-        return parts, "t2", IRL_W, IRL_H
+        return "irl", None, None, ""
+
+    if LAYOUT == "auto":
+        res = detect_camera("clip.mp4", STREAMER)
+        if res["found"]:
+            face = (res["x"], res["y"], res["w"], res["h"])
+            note = f"авто: камера найдена ({res['profile']}, {res['score']:.2f})"
+            print(note, "камера:", face, "game_x:", res["game_x"], flush=True)
+            return "split", face, res["game_x"], note
+        note = f"авто: {res['reason']}, сделан IRL 4:3"
+        print(note, flush=True)
+        return "irl", None, None, note
 
     if LAYOUT != "split":
-        raise ValueError(f"неизвестная раскладка: {LAYOUT} (допустимо: split, irl)")
+        raise ValueError(f"неизвестная раскладка: {LAYOUT} (допустимо: split, irl, auto)")
 
     profiles = STREAMERS.get(STREAMER)
     if not profiles:
@@ -156,9 +284,19 @@ def base_chain():
         raise ValueError(
             f"у стримера {STREAMER} нет профиля «{PROFILE}» (есть: {', '.join(profiles)})"
         )
+    return "split", cfg["face"], cfg["game_x"], ""
 
-    x, y, w, h = cfg["face"]
-    gx = cfg["game_x"]
+
+def base_chain(layout, face, gx):
+    """Возвращает (части фильтра, имя последней метки, ширина и высота видео)."""
+    if layout == "irl":
+        parts = [
+            # центр кадра в пропорции 4:3, края обрезаются (подходит и для нестандартных клипов)
+            f"[0:v]crop='min(iw,ih*4/3)':'min(ih,iw*3/4)',scale={IRL_W}:{IRL_H}[t2]",
+        ]
+        return parts, "t2", IRL_W, IRL_H
+
+    x, y, w, h = face
     face_crop = (
         f"crop=iw*{w / 1920:.5f}:ih*{h / 1080:.5f}"
         f":iw*{x / 1920:.5f}:ih*{y / 1080:.5f}"
@@ -175,8 +313,9 @@ def base_chain():
 
 
 def build_video():
-    parts, last, ow, oh = base_chain()
-    irl = LAYOUT == "irl"
+    layout, face, gx, note = resolve_plan()
+    parts, last, ow, oh = base_chain(layout, face, gx)
+    irl = layout == "irl"
     use_wm = os.path.exists(WATERMARK)
 
     # --- размеры и позиция знака ---
@@ -246,11 +385,11 @@ def build_video():
         "out.mp4",
     ]
     subprocess.run(cmd, check=True)
-    return ow, oh
+    return ow, oh, note, layout
 
 
-def send_video(ow, oh):
-    cap = f"🎬 {STREAMER}" + (" · IRL" if LAYOUT == "irl" else "")
+def send_video(ow, oh, note, layout):
+    cap = f"🎬 {STREAMER}" + (" · IRL" if layout == "irl" else "") + (f"\n{note}" if note else "")
     subprocess.run([
         "curl", "-sS", "--fail-with-body",
         "-F", f"chat_id={CHAT_ID}",
@@ -264,15 +403,15 @@ def send_video(ow, oh):
 
 
 def main():
-    print(f"make_video.py v3 | раскладка={LAYOUT} | стример={STREAMER} | профиль={PROFILE}", flush=True)
+    print(f"make_video.py v4 | раскладка={LAYOUT} | стример={STREAMER} | профиль={PROFILE}", flush=True)
     print("1/4 получаю ссылку на клип", flush=True)
     url = get_download_url(SLUG)
     print("2/4 скачиваю клип", flush=True)
     download(url, "clip.mp4")
     print("3/4 собираю видео", flush=True)
-    ow, oh = build_video()
+    ow, oh, note, layout = build_video()
     print(f"4/4 отправляю в Telegram ({ow}x{oh})", flush=True)
-    send_video(ow, oh)
+    send_video(ow, oh, note, layout)
     print("\nГотово: Telegram принял видео", flush=True)
 
 
