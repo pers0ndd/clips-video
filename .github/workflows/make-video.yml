@@ -17,11 +17,12 @@ on:
         required: false
         default: ""
       layout:
-        description: "Раскладка: split (камера + игра) или irl (4:3)"
+        description: "Раскладка: auto (камера найдётся сама), split (камера + игра) или irl (4:3)"
         required: false
         type: choice
-        default: split
+        default: auto
         options:
+          - auto
           - split
           - irl
       profile:
@@ -31,15 +32,17 @@ on:
 
 jobs:
   make:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install ffmpeg and fonts
+      - name: Install ffmpeg, fonts and OpenCV
         run: |
           sudo apt-get update
           sudo apt-get install -y ffmpeg fonts-dejavu-core
+          python3 -m pip install --quiet --break-system-packages opencv-python-headless \
+            || sudo apt-get install -y python3-opencv
 
       - name: Make and send video
         env:
