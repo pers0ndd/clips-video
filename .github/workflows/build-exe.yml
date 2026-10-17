@@ -9,7 +9,7 @@ on:
 jobs:
   build:
     runs-on: windows-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
@@ -17,20 +17,43 @@ jobs:
         with:
           python-version: "3.12"
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
       - name: Install PyInstaller
         run: python -m pip install --quiet pyinstaller
 
       - name: Check the program starts
         run: python clip_search.py --selftest
 
-      - name: Make the icon
-        run: python clip_search.py --write-icon
+      - name: Make the window files
+        run: python clip_search.py --write-shell shell
 
-      - name: Build clip_search.exe
-        run: python -m PyInstaller --noconfirm --clean --onefile --windowed --icon clip_search.ico --name clip_search clip_search.py
+      - name: Build the engine (clip_backend.exe)
+        run: |
+          python -m PyInstaller --noconfirm --clean --onefile --noconsole --icon shell/clip_search.ico --name clip_backend clip_search.py
+          New-Item -ItemType Directory -Force shell/backend | Out-Null
+          Copy-Item dist/clip_backend.exe shell/backend/clip_backend.exe
+
+      - name: Build the window (Electron)
+        working-directory: shell
+        run: |
+          npm install --no-audit --no-fund
+          npx --yes @electron/packager@18 . ClipSearch --platform=win32 --arch=x64 --out=out --overwrite --icon=clip_search.ico --extra-resource=backend/clip_backend.exe --ignore="^/backend" --ignore="^/out"
+
+      - name: Check the window opens
+        continue-on-error: true
+        run: |
+          $log = Join-Path $env:TEMP "clipsearch-smoke.txt"
+          Remove-Item $log -ErrorAction SilentlyContinue
+          $exe = Join-Path $PWD "shell/out/ClipSearch-win32-x64/ClipSearch.exe"
+          $p = Start-Process -FilePath $exe -ArgumentList "--smoke" -PassThru
+          if (-not $p.WaitForExit(90000)) { $p.Kill() }
+          if (Test-Path $log) { Get-Content $log } else { Write-Error "window check did not finish" }
 
       - uses: actions/upload-artifact@v4
         with:
-          name: clip_search
-          path: dist/clip_search.exe
+          name: ClipSearch
+          path: shell/out/ClipSearch-win32-x64
           retention-days: 30
