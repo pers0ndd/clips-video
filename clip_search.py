@@ -19,7 +19,7 @@ import urllib.request
 import webbrowser
 from datetime import datetime, timedelta, timezone
 
-VERSION = "2.0"
+VERSION = "2.1"
 
 # Адреса можно подменить переменными среды (так программа проверяется без интернета).
 API_BASE = os.environ.get("CLIPS_API_BASE", "https://api.twitch.tv/helix")
@@ -258,7 +258,9 @@ def search_clips(tw, login="", game_id="", words="", start=None, end=None, creat
             created = parse_time(u["created_at"][:19] + "Z")
         except Exception:
             created = None
-    if game_id:
+    # Twitch не принимает broadcaster_id и game_id в одном запросе (ошибка 400),
+    # поэтому при стримере ищем по нему, а категорию отбираем сами.
+    if game_id and not login:
         base["game_id"] = game_id
 
     now = datetime.now(timezone.utc)
@@ -305,6 +307,8 @@ def search_clips(tw, login="", game_id="", words="", start=None, end=None, creat
                 if creator and creator not in str(c.get("creator_name", "")).lower():
                     continue
                 if c.get("view_count", 0) < min_views:
+                    continue
+                if login and game_id and c.get("game_id") != game_id:
                     continue
                 found.append(c)
             cursor = (r.get("pagination") or {}).get("cursor")
@@ -507,14 +511,9 @@ svg.i { width: 1em; height: 1em; fill: none; stroke: currentColor; stroke-width:
   position: relative;
   display: grid;
   grid-template-columns: 224px minmax(0, 1fr);
-  margin: 20px;
-  height: calc(100vh - 40px);
-  border-radius: 30px;
-  background: rgba(10, 16, 46, 0.6);
-  border: 1px solid var(--line);
-  backdrop-filter: blur(24px) saturate(1.25);
-  -webkit-backdrop-filter: blur(24px) saturate(1.25);
-  box-shadow: 0 30px 90px rgba(0, 0, 0, 0.5);
+  height: 100vh;
+  background: rgba(10, 16, 46, 0.55);
+  box-shadow: inset 0 0 0 1px rgba(150, 172, 255, 0.22);
   overflow: hidden;
 }
 .side {
@@ -555,6 +554,14 @@ svg.i { width: 1em; height: 1em; fill: none; stroke: currentColor; stroke-width:
   display: flex; align-items: center; gap: 16px;
   padding: 22px 30px 0;
 }
+.top { -webkit-app-region: drag; user-select: none; }
+.top button, .top .pill, .wc, .wc button { -webkit-app-region: no-drag; }
+.brand { -webkit-app-region: drag; user-select: none; }
+.wc { position: fixed; top: 0; right: 0; z-index: 70; display: flex; }
+.wc button { width: 48px; height: 34px; background: none; border: 0; border-radius: 0; color: var(--muted); display: grid; place-items: center; font-size: 15px; }
+.wc button:hover { background: rgba(150, 172, 255, 0.16); color: #fff; }
+.wc button.x:hover { background: #e5384f; color: #fff; }
+body.has-wc .top { padding-right: 170px; }
 .crumbs { display: flex; align-items: center; gap: 10px; color: var(--muted); font-size: 13px; }
 .crumbs svg { font-size: 15px; }
 .crumbs .sep { color: var(--faint); }
@@ -796,7 +803,7 @@ h1 b { font-weight: 500; background: linear-gradient(90deg, #7f9bff, #a38bff); -
 
 @media (max-width: 1240px) { .grid { grid-template-columns: minmax(0, 1fr); } .rail { position: static; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); } }
 @media (max-width: 980px) {
-  .shell { grid-template-columns: 74px minmax(0, 1fr); margin: 10px; height: calc(100vh - 20px); }
+  .shell { grid-template-columns: 74px minmax(0, 1fr); }
   .nav button span:not(.ic), .brand b, .side .foot { display: none; }
   .nav .count { display: none; }
   .clip { grid-template-columns: auto 140px minmax(0, 1fr); }
@@ -814,6 +821,11 @@ h1 b { font-weight: 500; background: linear-gradient(90deg, #7f9bff, #a38bff); -
   <path d="M0 190 L120 168 L240 186 L380 160 L520 184 L680 164 L820 188 L980 168 L1120 186 L1280 166 L1440 184 L1440 220 L0 220Z" fill="#070a1d"/>
 </svg>
 
+<div class="wc" id="wc" hidden>
+  <button data-w="min" aria-label="Свернуть"><svg class="i" viewBox="0 0 24 24"><path d="M5 12h14"/></svg></button>
+  <button data-w="max" aria-label="Развернуть"><svg class="i" viewBox="0 0 24 24"><rect x="5" y="5" width="14" height="14" rx="1.5"/></svg></button>
+  <button data-w="close" class="x" aria-label="Закрыть"><svg class="i" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"/></svg></button>
+</div>
 <div class="shell">
   <aside class="side">
     <div class="brand"><img src="/icon.png" alt=""><b>Clip<span>Search</span></b></div>
@@ -1387,7 +1399,7 @@ function paintDl() {
 }
 function shortPath(p) { return p.length > 30 ? "…" + p.slice(-29) : p; }
 function paintDir() { $("dirText").textContent = shortPath(S.dir); $("dirText2").textContent = S.dir; $("dirText").title = S.dir; }
-async function pickDir() { const r = await api("/api/pickfolder", {}); if (r.path) { const s = await api("/api/settings", { download_dir: r.path }); S.dir = s.downloadDir; paintDir(); } else toast("Папка не выбрана"); }
+async function pickDir() { const r = window.cs ? { path: await window.cs.pickFolder(S.dir) } : await api("/api/pickfolder", {}); if (r.path) { const s = await api("/api/settings", { download_dir: r.path }); S.dir = s.downloadDir; paintDir(); } else toast("Папка не выбрана"); }
 ["dirPick", "dirPick2"].forEach((id) => $(id).addEventListener("click", pickDir));
 ["dirOpen", "dirOpen2"].forEach((id) => $(id).addEventListener("click", () => api("/api/reveal", { path: S.dir })));
 
@@ -1434,7 +1446,12 @@ document.querySelectorAll(".nav [data-view]").forEach((b) => b.addEventListener(
   $("crumb").textContent = b.dataset.view === "search" ? "Поиск клипов" : "Загрузки";
   $("scroller").scrollTop = 0;
 }));
+if (window.cs) {
+  document.body.classList.add("has-wc"); $("wc").hidden = false;
+  $("wc").addEventListener("click", (e) => { const b = e.target.closest("[data-w]"); if (b) window.cs.win(b.dataset.w); });
+}
 $("navQuit").addEventListener("click", async () => {
+  if (window.cs) { window.cs.win("close"); return; }
   await api("/api/quit", {});
   document.body.innerHTML = '<div style="height:100vh;display:grid;place-items:center;color:#95a0d0;font:16px system-ui">Программа закрыта. Это окно можно закрыть.</div>';
   setTimeout(() => window.close(), 300);
@@ -1857,6 +1874,211 @@ def run_app(open_window=True):
     return ctx
 
 
+# ---------------------------------------------------------------- оболочка окна (Electron)
+# Эти три файла сборка кладёт в папку shell и упаковывает вместе с программой.
+
+SHELL_PACKAGE_JSON = r'''{
+  "name": "clipsearch",
+  "productName": "ClipSearch",
+  "version": "2.1.0",
+  "description": "Поиск клипов Twitch",
+  "main": "main.js",
+  "devDependencies": {
+    "electron": "^33.2.1"
+  }
+}
+'''
+
+SHELL_PRELOAD_JS = r'''const { contextBridge, ipcRenderer } = require("electron");
+contextBridge.exposeInMainWorld("cs", {
+  win: (what) => ipcRenderer.send("win", what),
+  pickFolder: (initial) => ipcRenderer.invoke("pick-folder", initial),
+});
+'''
+
+SHELL_MAIN_JS = r'''const { app, BrowserWindow, ipcMain, dialog, Menu } = require("electron");
+const path = require("path");
+const net = require("net");
+const http = require("http");
+const crypto = require("crypto");
+const fs = require("fs");
+const os = require("os");
+const { spawn } = require("child_process");
+
+const SMOKE = process.argv.includes("--smoke");
+let win = null;
+let backend = null;
+
+function smokeLog(text) {
+  if (!SMOKE) return;
+  try { fs.appendFileSync(path.join(os.tmpdir(), "clipsearch-smoke.txt"), text + "\n"); } catch (e) {}
+}
+
+function fatal(e) {
+  smokeLog("FATAL " + String(e));
+  try { dialog.showErrorBox("Поиск клипов", "Программа не запустилась: " + String(e)); } catch (x) {}
+  app.exit(1);
+}
+
+function freePort() {
+  return new Promise((resolve, reject) => {
+    const s = net.createServer();
+    s.once("error", reject);
+    s.listen(0, "127.0.0.1", () => {
+      const p = s.address().port;
+      s.close(() => resolve(p));
+    });
+  });
+}
+
+function waitReady(port) {
+  return new Promise((resolve, reject) => {
+    let tries = 0;
+    const attempt = () => {
+      const req = http.get({ host: "127.0.0.1", port, path: "/icon.png", timeout: 1500 }, (res) => {
+        res.resume();
+        if (res.statusCode === 200) resolve(); else retry();
+      });
+      req.on("error", retry);
+      req.on("timeout", () => { req.destroy(); retry(); });
+    };
+    const retry = () => {
+      if (++tries > 120) reject(new Error("не запустился встроенный сервер"));
+      else setTimeout(attempt, 250);
+    };
+    attempt();
+  });
+}
+
+function killBackend() {
+  if (!backend) return;
+  const pid = backend.pid;
+  try {
+    if (process.platform === "win32") spawn("taskkill", ["/pid", String(pid), "/T", "/F"], { windowsHide: true, stdio: "ignore" });
+    else backend.kill();
+  } catch (e) {}
+}
+
+function backendPath() {
+  return app.isPackaged
+    ? path.join(process.resourcesPath, "clip_backend.exe")
+    : path.join(__dirname, "backend", "clip_backend.exe");
+}
+
+function createWindow(url) {
+  win = new BrowserWindow({
+    width: 1380,
+    height: 880,
+    minWidth: 1000,
+    minHeight: 640,
+    frame: false,
+    backgroundColor: "#070b1f",
+    show: false,
+    title: "Поиск клипов",
+    icon: path.join(__dirname, "clip_search.ico"),
+    webPreferences: {
+      preload: path.join(__dirname, "preload.js"),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+      backgroundThrottling: false,
+    },
+  });
+  win.once("ready-to-show", () => win.show());
+  win.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
+  win.webContents.on("will-navigate", (e, target) => { if (!target.startsWith(url)) e.preventDefault(); });
+  win.on("closed", () => { win = null; app.quit(); });
+  win.webContents.on("did-finish-load", async () => {
+    if (!SMOKE) return;
+    try {
+      const r = await win.webContents.executeJavaScript(
+        'document.title + "|shell=" + !!document.querySelector(".shell") + "|cs=" + (typeof window.cs)'
+      );
+      smokeLog("SMOKE OK " + r);
+    } catch (e) { smokeLog("SMOKE FAIL " + e); }
+    setTimeout(() => app.quit(), 500);
+  });
+  win.loadURL(url);
+}
+
+ipcMain.on("win", (e, what) => {
+  const w = BrowserWindow.fromWebContents(e.sender);
+  if (!w) return;
+  if (what === "min") w.minimize();
+  else if (what === "max") { if (w.isMaximized()) w.unmaximize(); else w.maximize(); }
+  else if (what === "close") w.close();
+});
+
+ipcMain.handle("pick-folder", async (e, initial) => {
+  const w = BrowserWindow.fromWebContents(e.sender);
+  const r = await dialog.showOpenDialog(w, {
+    title: "Куда сохранять клипы",
+    defaultPath: initial || undefined,
+    properties: ["openDirectory", "createDirectory"],
+  });
+  return r.canceled || !r.filePaths.length ? "" : r.filePaths[0];
+});
+
+async function main() {
+  Menu.setApplicationMenu(null);
+  const port = await freePort();
+  const token = crypto.randomBytes(16).toString("hex");
+  backend = spawn(backendPath(), ["--serve", "--port", String(port), "--token", token], { windowsHide: true, stdio: "ignore" });
+  backend.on("error", fatal);
+  backend.on("exit", (code) => { backend = null; if (code) fatal("встроенный сервер остановился, код " + code); else app.quit(); });
+  await waitReady(port);
+  createWindow("http://127.0.0.1:" + port + "/");
+  if (SMOKE) setTimeout(() => { smokeLog("SMOKE TIMEOUT"); app.exit(2); }, 60000);
+}
+
+if (!SMOKE && !app.requestSingleInstanceLock()) {
+  app.quit();
+} else {
+  app.on("second-instance", () => { if (win) { if (win.isMinimized()) win.restore(); win.focus(); } });
+  app.on("before-quit", killBackend);
+  app.on("window-all-closed", () => app.quit());
+  app.whenReady().then(main).catch(fatal);
+}
+'''
+
+
+def write_shell(folder):
+    os.makedirs(folder, exist_ok=True)
+    for name, text in (("package.json", SHELL_PACKAGE_JSON), ("preload.js", SHELL_PRELOAD_JS), ("main.js", SHELL_MAIN_JS)):
+        with open(os.path.join(folder, name), "w", encoding="utf-8", newline="\n") as f:
+            f.write(text)
+    with open(os.path.join(folder, "clip_search.ico"), "wb") as f:
+        f.write(icon_ico_bytes())
+
+
+def serve(port, token):
+    """Режим для оболочки: только сервер, окно открывает Electron."""
+    ctx = Ctx()
+    ctx.token = token
+    srv = Server(("127.0.0.1", port), make_handler(ctx))
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    log(f"serve {VERSION} port={port}")
+    started = time.time()
+    while not ctx.quit.is_set():
+        time.sleep(0.5)
+        now = time.time()
+        if ctx.bye_at and now > ctx.bye_at:
+            break
+        if ctx.seen_ping and now - ctx.last_ping > 40:
+            break
+        if not ctx.seen_ping and now - started > 180:
+            break
+    srv.shutdown()
+
+
+def arg_value(name):
+    if name in sys.argv:
+        i = sys.argv.index(name)
+        if i + 1 < len(sys.argv):
+            return sys.argv[i + 1]
+    return ""
+
+
 def selftest():
     import urllib.request as ur
 
@@ -1886,6 +2108,16 @@ def main():
     if "--write-icon" in sys.argv:
         with open("clip_search.ico", "wb") as f:
             f.write(icon_ico_bytes())
+        return 0
+    if "--write-shell" in sys.argv:
+        write_shell(arg_value("--write-shell") or "shell")
+        return 0
+    if "--serve" in sys.argv:
+        try:
+            serve(int(arg_value("--port")), arg_value("--token"))
+        except Exception as e:
+            log(f"fatal serve: {e!r}")
+            return 1
         return 0
     try:
         run_app()
