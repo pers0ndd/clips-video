@@ -389,7 +389,29 @@ def build_video():
 
 
 def send_video(ow, oh, note, layout):
-    cap = f"🎬 {STREAMER}" + (" · IRL" if layout == "irl" else "") + (f"\n{note}" if note else "")
+    # Подпись содержит служебные строки «Клип», «Режим», «Текст»: по ним бот
+    # понимает, что пересобирать, когда нажимают кнопки под видео. Не меняйте их.
+    mode = LAYOUT if LAYOUT in ("auto", "split", "irl") else "split"
+    if mode == "split":
+        mode += f" · {PROFILE}"
+    clean_text = " ".join(TEXT.split())
+    cap = f"🎬 {STREAMER}" + (" · IRL" if layout == "irl" else "")
+    if note:
+        cap += f"\n{note}"
+    cap += f"\nКлип: {SLUG}\nРежим: {mode}"
+    if clean_text:
+        cap += f"\nТекст: {clean_text}"
+    cap = cap[:1000]
+
+    # Кнопки под видео: «Другой текст» и «Раскладка» (и «Без текста», если текст был).
+    row = [
+        {"text": "✏️ Другой текст", "callback_data": "v:t"},
+        {"text": "🔁 Раскладка", "callback_data": "v:l"},
+    ]
+    keyboard = [row]
+    if clean_text:
+        keyboard.append([{"text": "🚫 Без текста", "callback_data": "v:n"}])
+
     subprocess.run([
         "curl", "-sS", "--fail-with-body",
         "-F", f"chat_id={CHAT_ID}",
@@ -397,13 +419,14 @@ def send_video(ow, oh, note, layout):
         "-F", "supports_streaming=true",
         "-F", f"width={ow}",
         "-F", f"height={oh}",
-        "-F", f"caption={cap}",
+        "--form-string", f"caption={cap}",
+        "--form-string", "reply_markup=" + json.dumps({"inline_keyboard": keyboard}),
         f"https://api.telegram.org/bot{BOT_TOKEN}/sendVideo",
     ], check=True)
 
 
 def main():
-    print(f"make_video.py v4 | раскладка={LAYOUT} | стример={STREAMER} | профиль={PROFILE}", flush=True)
+    print(f"make_video.py v5 | раскладка={LAYOUT} | стример={STREAMER} | профиль={PROFILE}", flush=True)
     print("1/4 получаю ссылку на клип", flush=True)
     url = get_download_url(SLUG)
     print("2/4 скачиваю клип", flush=True)
