@@ -20,12 +20,14 @@ jobs:
       - name: Install PyInstaller
         run: python -m pip install --quiet pyinstaller
 
-      - name: Check that the window opens
-        continue-on-error: true
+      - name: Check the program starts
         run: python clip_search.py --selftest
 
+      - name: Make the icon
+        run: python clip_search.py --write-icon
+
       - name: Build clip_search.exe
-        run: python -m PyInstaller --noconfirm --clean --onefile --windowed --name clip_search clip_search.py
+        run: python -m PyInstaller --noconfirm --clean --onefile --windowed --icon clip_search.ico --name clip_search clip_search.py
 
       - uses: actions/upload-artifact@v4
         with:
